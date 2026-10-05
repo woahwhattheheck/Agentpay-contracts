@@ -25,7 +25,7 @@ The Rust toolchain is pinned via `rust-toolchain.toml` (stable channel with `was
 ## Documentation
 
 - [CHANGELOG](CHANGELOG.md) — versioned history of entrypoints, events, and error codes; contribution conventions.
-- [EscrowError code table](docs/escrow/errors.md) — full reference for all 23 error codes: trigger conditions, overloaded codes, and the entrypoints that raise each code.
+- [EscrowError code table](docs/escrow/errors.md) — full reference for all 28 error codes: trigger conditions, overloaded codes, and the entrypoints that raise each code.
 - [Escrow: Pricing Model](docs/escrow/pricing.md) — flat-rate vs. tiered volume-discount billing, tier-boundary semantics with worked examples, and the global price-bounds invariants.
 
 ### Service ownership handover

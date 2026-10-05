@@ -49,7 +49,7 @@ contract's public ABI: client SDKs match on them, so they are **append-only**.
 | 3 | `NotInitialized` | Admin-gated entrypoint invoked before `init`. |
 | 4 | `ContractPaused` | State-changing entrypoint called while `Paused` is `true`. |
 | 5 | `NoPendingAdminTransfer` | `accept_admin_transfer` called but no pending admin is set. |
-| 6 | `NotPendingAdmin` | `accept_admin_transfer` called by the wrong address (reused for unauthorized metadata callers). |
+| 6 | `NotPendingAdmin` | `accept_admin_transfer` called by the wrong address. |
 | 7 | `ServiceNotRegistered` | `record_usage` referenced an unregistered service while strict registration is enabled. |
 | 8 | `RequestsExceedsMaxPerCall` | `record_usage` exceeded `MaxRequestsPerCall` cap. |
 | 9 | `RequestsBelowMinPerCall` | `record_usage` below `MinRequestsPerCall` floor. |
@@ -66,8 +66,18 @@ contract's public ABI: client SDKs match on them, so they are **append-only**.
 | 20 | `DisputeAlreadyOpen` | `open_dispute` called but a dispute is already open for the pair. |
 | 21 | `NoOpenDispute` | `resolve_dispute` called but no dispute is open. |
 | 22 | `RefundExceedsUsage` | `resolve_dispute` `refund_requests` exceeds current usage. |
+| 23 | `InvalidRequestBounds` | Minimum request count exceeds the configured maximum, or vice versa. |
+| 24 | `PriceOutOfBounds` | Service price is outside the configured bounds. |
+| 25 | `InvertedPriceBand` | Minimum price exceeds maximum price. |
+| 26 | `Unauthorized` | Authenticated caller lacks contract-domain authority, including settlement by a non-owner. |
+| 27 | `InvalidOwnerTransfer` | Proposed owner is already the service owner. |
+| 28 | `InsufficientCreditBalance` | Projected usage bill exceeds positive prepaid credit. |
 
-The next new error must use code **23**.
+The next new error must use code **29**.
+
+Settlement rejects an authenticated caller who is neither admin nor service
+owner with #26 `Unauthorized`. Code #6 `NotPendingAdmin` is reserved for
+admin handover. Assert the exact contract error in negative-path tests.
 
 See the [full error reference](docs/escrow/errors.md) for trigger conditions,
 entrypoints, and notes on overloaded codes.

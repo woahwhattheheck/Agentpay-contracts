@@ -1,3 +1,5 @@
+use soroban_sdk::{symbol_short, Symbol};
+
 /// Event topic constants.
 ///
 /// NOTE: Events MUST use `symbol_short!` with a maximum of 9 characters.
