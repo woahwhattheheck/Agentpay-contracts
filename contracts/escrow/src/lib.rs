@@ -230,6 +230,10 @@ pub enum DataKey {
     /// `settle` call drained this `(agent, service_id)` pair. Lets
     /// off-chain SLA monitoring catch stuck settlement cycles.
     LastSettlement(Address, Symbol),
+    /// Monotonic optimistic-concurrency version for settlement of one
+    /// `(agent, service_id)` pair. Starts at 0 and bumps after every
+    /// successful direct or batched settlement of that pair.
+    SettlementVersion(Address, Symbol),
     /// On-chain storage schema version. Distinct from the contract
     /// version() (which is the compiled wasm version): SchemaVersion
     /// tracks what the persisted state layout looks like so callers can
@@ -383,6 +387,13 @@ pub enum EscrowError {
     /// insufficient to cover the bill that would be settled for the updated
     /// usage total.
     InsufficientCreditBalance = 28,
+    /// `settle` was called with an expected settlement version that does
+    /// not match the pair's current version.
+    ///
+    /// Code 30 intentionally avoids the code 29 allocation already used by
+    /// the in-flight settlement replay guard, so the two independent changes
+    /// cannot publish conflicting stable discriminants.
+    VersionConflict = 30,
 }
 
 #[contracttype]
@@ -1061,6 +1072,19 @@ impl Escrow {
             .get(&DataKey::LastSettlement(agent, service_id))
     }
 
+    /// Return the optimistic-concurrency version for settlement of an
+    /// `(agent, service_id)` pair. New pairs start at version 0.
+    ///
+    /// The version bumps only after a successful settlement transaction.
+    /// Callers should read this value immediately before `settle` and pass
+    /// it back as `expected_version`.
+    pub fn get_settlement_version(env: Env, agent: Address, service_id: Symbol) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SettlementVersion(agent, service_id))
+            .unwrap_or(0)
+    }
+
     /// Return a cross-service settlement snapshot for one agent.
     ///
     /// Pure read — no `require_auth`, no pause gate. Reuses
@@ -1592,7 +1616,13 @@ impl Escrow {
     /// the billed amount in stroops. The settlement loop is expected to
     /// transfer the returned amount off-chain or via a paired token
     /// contract call; this contract intentionally holds no balance.
-    pub fn settle(env: Env, caller: Address, agent: Address, service_id: Symbol) -> i128 {
+    pub fn settle(
+        env: Env,
+        caller: Address,
+        agent: Address,
+        service_id: Symbol,
+        expected_version: u64,
+    ) -> i128 {
         ensure_not_paused(&env);
         caller.require_auth();
         let admin = get_admin_address(&env);
@@ -1603,6 +1633,17 @@ impl Escrow {
             &service_id,
             EscrowError::NotPendingAdmin,
         );
+
+        let version_key = DataKey::SettlementVersion(agent.clone(), service_id.clone());
+        let current_version: u64 = env
+            .storage()
+            .persistent()
+            .get(&version_key)
+            .unwrap_or(0);
+        if expected_version != current_version {
+            panic_with_error!(&env, EscrowError::VersionConflict);
+        }
+
         let usage_key = DataKey::Usage(agent.clone(), service_id.clone());
         let requests: u32 = env.storage().persistent().get(&usage_key).unwrap_or(0);
         // Use tier schedule when present; fall back to flat price.
@@ -1619,6 +1660,16 @@ impl Escrow {
             &DataKey::LastSettlement(agent.clone(), service_id.clone()),
             &env.ledger().timestamp(),
         );
+
+        let new_version = current_version.saturating_add(1);
+        env.storage()
+            .persistent()
+            .set(&version_key, &new_version);
+        env.events().publish(
+            (events::TOPIC_SETTLE_V,),
+            (agent.clone(), service_id.clone(), new_version),
+        );
+
         env.events().publish(
             (symbol_short!("settled"),),
             (agent, service_id, requests, billed),
@@ -1707,6 +1758,25 @@ impl Escrow {
                 &DataKey::LastSettlement(agent.clone(), service_id.clone()),
                 &now,
             );
+
+            // Batch settlement mutates the same per-pair settlement state as
+            // `settle`, so it must also invalidate any version read before
+            // this sweep.
+            let version_key = DataKey::SettlementVersion(agent.clone(), service_id.clone());
+            let current_version: u64 = env
+                .storage()
+                .persistent()
+                .get(&version_key)
+                .unwrap_or(0);
+            let new_version = current_version.saturating_add(1);
+            env.storage()
+                .persistent()
+                .set(&version_key, &new_version);
+            env.events().publish(
+                (events::TOPIC_SETTLE_V,),
+                (agent.clone(), service_id.clone(), new_version),
+            );
+
             env.events().publish(
                 (symbol_short!("settled"),),
                 (agent.clone(), service_id.clone(), requests, billed),
