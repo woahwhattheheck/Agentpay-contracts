@@ -524,16 +524,13 @@ fn is_owner_or_admin(admin: &Address, caller: &Address, owner: &Address) -> bool
 ///
 /// Panics with [`EscrowError::ServiceMetadataNotFound`] if a non-admin
 /// caller references a service with no metadata, or with
-/// `unauthorized_err` if a non-admin, non-owner caller is rejected --
-/// callers pass their own existing code here (`settle` uses
-/// `NotPendingAdmin`, `settle_all` uses `Unauthorized`) so this extraction
-/// changes no ABI-visible rejection behaviour.
+/// [`EscrowError::Unauthorized`] (#26) if an authenticated caller is neither
+/// the admin nor the service owner. Code #6 is reserved for admin handover.
 fn require_settlement_authorized(
     env: &Env,
     admin: &Address,
     caller: &Address,
     service_id: &Symbol,
-    unauthorized_err: EscrowError,
 ) {
     if caller == admin {
         return;
@@ -544,7 +541,7 @@ fn require_settlement_authorized(
         .get(&DataKey::ServiceMetadata(service_id.clone()))
         .unwrap_or_else(|| panic_with_error!(env, EscrowError::ServiceMetadataNotFound));
     if !is_owner_or_admin(admin, caller, &meta.owner) {
-        panic_with_error!(env, unauthorized_err);
+        panic_with_error!(env, EscrowError::Unauthorized);
     }
 }
 
@@ -999,7 +996,6 @@ impl Escrow {
                 (events::TOPIC_USAGE_HI,),
                 (agent.clone(), service_id.clone(), total),
             );
-
         }
 
         UsageRecord {
@@ -1388,8 +1384,7 @@ impl Escrow {
         env.storage()
             .persistent()
             .remove(&DataKey::ServicePrice(service_id.clone()));
-        env.events()
-            .publish((events::TOPIC_PRICE_RMV,), service_id);
+        env.events().publish((events::TOPIC_PRICE_RMV,), service_id);
     }
 
     /// Admin sets a volume-discount tier schedule for a service.
@@ -1442,8 +1437,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::PriceTiers(service_id.clone()), &tiers);
         bump_persistent(&env, &DataKey::PriceTiers(service_id.clone()));
-        env.events()
-            .publish((symbol_short!("tiers_set"),), service_id);
+        env.events().publish((events::TOPIC_TIERS_SET,), service_id);
     }
 
     /// Read the tier schedule for a service, or `None` if no schedule has
@@ -1467,8 +1461,7 @@ impl Escrow {
         env.storage()
             .persistent()
             .remove(&DataKey::PriceTiers(service_id.clone()));
-        env.events()
-            .publish((symbol_short!("tiers_rm"),), service_id);
+        env.events().publish((events::TOPIC_TIERS_RM,), service_id);
     }
 
     /// Get the per-request price (in stroops) for a service, or 0 if
@@ -1587,22 +1580,20 @@ impl Escrow {
 
     /// Settle the accumulated usage for an `(agent, service_id)` pair.
     ///
-    /// Admin-gated. Computes the outstanding bill (same math as
+    /// Admin or service owner gated. Computes the outstanding bill (same math as
     /// `compute_billing`), resets the usage counter to zero, and returns
     /// the billed amount in stroops. The settlement loop is expected to
     /// transfer the returned amount off-chain or via a paired token
     /// contract call; this contract intentionally holds no balance.
+    ///
+    /// Typed rejection codes: #3 before initialization, #4 while paused,
+    /// #13 for missing service metadata on a non-admin call, and #26 for an
+    /// authenticated caller who is neither admin nor service owner.
     pub fn settle(env: Env, caller: Address, agent: Address, service_id: Symbol) -> i128 {
         ensure_not_paused(&env);
         caller.require_auth();
         let admin = get_admin_address(&env);
-        require_settlement_authorized(
-            &env,
-            &admin,
-            &caller,
-            &service_id,
-            EscrowError::NotPendingAdmin,
-        );
+        require_settlement_authorized(&env, &admin, &caller, &service_id);
         let usage_key = DataKey::Usage(agent.clone(), service_id.clone());
         let requests: u32 = env.storage().persistent().get(&usage_key).unwrap_or(0);
         // Use tier schedule when present; fall back to flat price.
@@ -1620,7 +1611,7 @@ impl Escrow {
             &env.ledger().timestamp(),
         );
         env.events().publish(
-            (symbol_short!("settled"),),
+            (events::TOPIC_SETTLED,),
             (agent, service_id, requests, billed),
         );
         billed
@@ -1680,13 +1671,7 @@ impl Escrow {
 
         for service_id in svc_list.iter() {
             // Non-admin callers must own this specific service.
-            require_settlement_authorized(
-                &env,
-                &admin,
-                &caller,
-                &service_id,
-                EscrowError::Unauthorized,
-            );
+            require_settlement_authorized(&env, &admin, &caller, &service_id);
 
             let usage_key = DataKey::Usage(agent.clone(), service_id.clone());
             let requests: u32 = env.storage().persistent().get(&usage_key).unwrap_or(0);
@@ -1708,7 +1693,7 @@ impl Escrow {
                 &now,
             );
             env.events().publish(
-                (symbol_short!("settled"),),
+                (events::TOPIC_SETTLED,),
                 (agent.clone(), service_id.clone(), requests, billed),
             );
 
@@ -1717,7 +1702,7 @@ impl Escrow {
         }
 
         env.events().publish(
-            (symbol_short!("settl_all"),),
+            (events::TOPIC_SETTL_ALL,),
             (agent, results.len(), total_billed),
         );
 
@@ -1775,7 +1760,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::MaxServicePrice, &max_stroops);
         env.events()
-            .publish((symbol_short!("bnd_set"),), (min_stroops, max_stroops));
+            .publish((events::TOPIC_BND_SET,), (min_stroops, max_stroops));
     }
 
     /// Read the configured global minimum service price in stroops.
@@ -1831,7 +1816,7 @@ impl Escrow {
         require_admin(&env);
         write_flag(&env, &DataKey::AgentAllowed(agent.clone()), allowed);
         env.events()
-            .publish((symbol_short!("agt_alw"),), (agent, allowed));
+            .publish((events::TOPIC_AGT_ALW,), (agent, allowed));
     }
 
     /// Read whether an agent is on the blocklist (false for never-set).
@@ -1851,7 +1836,7 @@ impl Escrow {
         require_admin(&env);
         write_flag(&env, &DataKey::AgentBlocked(agent.clone()), blocked);
         env.events()
-            .publish((symbol_short!("agt_blk"),), (agent, blocked));
+            .publish((events::TOPIC_AGT_BLK,), (agent, blocked));
     }
 
     /// Admin sets the per-call lower bound on `requests` for batched
@@ -1978,7 +1963,7 @@ impl Escrow {
         env.storage()
             .persistent()
             .remove(&DataKey::RateWindow(agent.clone()));
-        env.events().publish((symbol_short!("rate_rst"),), agent);
+        env.events().publish((events::TOPIC_RATE_RST,), agent);
     }
 
     /// Read the configured usage-alert threshold, or `0` (alerting
@@ -2017,8 +2002,8 @@ impl Escrow {
             .persistent()
             .set(&DataKey::UsageAlertThreshold, &threshold);
         env.events().publish(
-            (symbol_short!("cfg_set"),),
-            (symbol_short!("alert_thr"), threshold),
+            (events::TOPIC_CFG_SET,),
+            (events::TOPIC_ALERT_THR, threshold),
         );
     }
 
@@ -2075,7 +2060,7 @@ impl Escrow {
     pub fn set_require_service_registration(env: Env, required: bool) {
         require_admin(&env);
         write_flag(&env, &DataKey::RequireServiceRegistration, required);
-        publish_cfg_event(&env, symbol_short!("req_reg"), required);
+        publish_cfg_event(&env, events::TOPIC_REQ_REG, required);
     }
 
     /// Read the strict-registration flag.
@@ -2099,7 +2084,7 @@ impl Escrow {
             .remove(&DataKey::ServiceRegistered(service_id.clone()));
         // Emit svc_rm so indexers can observe the deregistration without
         // polling ServiceRegistered storage directly.
-        env.events().publish((symbol_short!("svc_rm"),), service_id);
+        env.events().publish((events::TOPIC_SVC_RM,), service_id);
     }
 
     /// Register a service so `record_usage` accepts it under strict
@@ -2109,8 +2094,7 @@ impl Escrow {
         write_flag(&env, &DataKey::ServiceRegistered(service_id.clone()), true);
         // Emit svc_add so indexers observe plain registrations (no metadata)
         // without having to infer the state change from absent events.
-        env.events()
-            .publish((symbol_short!("svc_add"),), service_id);
+        env.events().publish((events::TOPIC_SVC_ADD,), service_id);
     }
 
     /// Atomically register a service AND set its metadata in one
@@ -2142,7 +2126,7 @@ impl Escrow {
         );
         bump_persistent(&env, &DataKey::ServiceMetadata(service_id.clone()));
         env.events()
-            .publish((symbol_short!("svc_reg"),), (service_id, owner));
+            .publish((events::TOPIC_SVC_REG,), (service_id, owner));
     }
 
     /// Cancel a pending admin transfer. Current admin only. No-op when
@@ -2157,7 +2141,7 @@ impl Escrow {
         let cancelled: Option<Address> = env.storage().persistent().get(&DataKey::PendingAdmin);
         env.storage().persistent().remove(&DataKey::PendingAdmin);
         env.events()
-            .publish((symbol_short!("admin_can"),), (admin, cancelled));
+            .publish((events::TOPIC_ADMIN_CAN,), (admin, cancelled));
     }
 
     /// Read the pending admin, if any.
@@ -2198,7 +2182,7 @@ impl Escrow {
         env.storage().persistent().set(&DataKey::Admin, &caller);
         env.storage().persistent().remove(&DataKey::PendingAdmin);
         env.events()
-            .publish((symbol_short!("admin_chg"),), (old_admin, caller));
+            .publish((events::TOPIC_ADMIN_CHG,), (old_admin, caller));
     }
 
     /// Step 1 of admin handover. Current admin proposes a new admin
@@ -2219,7 +2203,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::PendingAdmin, &new_admin);
         env.events()
-            .publish((symbol_short!("admin_prp"),), (admin, new_admin));
+            .publish((events::TOPIC_ADMIN_PRP,), (admin, new_admin));
     }
 
     /// Returns `true` iff the contract is currently paused.
@@ -2232,7 +2216,7 @@ impl Escrow {
     pub fn unpause(env: Env) {
         require_admin(&env);
         write_flag(&env, &DataKey::Paused, false);
-        env.events().publish((symbol_short!("paused"),), false);
+        env.events().publish((events::TOPIC_PAUSED,), false);
     }
 
     /// Pause the contract — every state-changing entrypoint will then
@@ -2241,7 +2225,7 @@ impl Escrow {
     pub fn pause(env: Env) {
         require_admin(&env);
         write_flag(&env, &DataKey::Paused, true);
-        env.events().publish((symbol_short!("paused"),), true);
+        env.events().publish((events::TOPIC_PAUSED,), true);
     }
 
     /// Migrate the persisted schema from v1 to v2. Admin-gated and
@@ -2292,7 +2276,7 @@ impl Escrow {
             disabled,
         );
         env.events()
-            .publish((symbol_short!("svc_dis"),), (service_id, disabled));
+            .publish((events::TOPIC_SVC_DIS,), (service_id, disabled));
     }
 
     /// Admin sets human-readable metadata for a service. Persisted
@@ -2312,7 +2296,7 @@ impl Escrow {
         );
         bump_persistent(&env, &DataKey::ServiceMetadata(service_id.clone()));
         env.events()
-            .publish((symbol_short!("meta_set"),), (service_id, owner));
+            .publish((events::TOPIC_META_SET,), (service_id, owner));
     }
 
     /// Transfer ownership of a service's metadata to `new_owner`,
@@ -2359,7 +2343,7 @@ impl Escrow {
             .set(&DataKey::ServiceMetadata(service_id.clone()), &meta);
         bump_persistent(&env, &DataKey::ServiceMetadata(service_id.clone()));
         env.events().publish(
-            (symbol_short!("owner_chg"),),
+            (events::TOPIC_OWNER_CHG,),
             (service_id, old_owner, new_owner),
         );
     }
@@ -2376,8 +2360,7 @@ impl Escrow {
         env.storage()
             .persistent()
             .remove(&DataKey::ServiceMetadata(service_id.clone()));
-        env.events()
-            .publish((symbol_short!("meta_clr"),), service_id);
+        env.events().publish((events::TOPIC_META_CLR,), service_id);
     }
 
     /// Read the on-chain schema version, or `1` (the implicit
@@ -2558,7 +2541,12 @@ impl Escrow {
             write_flag(&env, &dispute_key, false);
             env.events().publish(
                 (events::TOPIC_DISPUTE,),
-                (events::TOPIC_RESOLVE, agent.clone(), service_id.clone(), current),
+                (
+                    events::TOPIC_RESOLVE,
+                    agent.clone(),
+                    service_id.clone(),
+                    current,
+                ),
             );
         }
     }
