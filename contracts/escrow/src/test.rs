@@ -111,6 +111,19 @@ fn setup_initialized(env: &Env) -> (EscrowClient<'_>, Address) {
     (client, admin)
 }
 
+/// Preserve existing settlement tests while exercising the new public
+/// optimistic-concurrency contract: read the pair's current version, then
+/// submit that exact value to `settle`.
+fn settle_current(
+    client: &EscrowClient<'_>,
+    caller: &Address,
+    agent: &Address,
+    service_id: &Symbol,
+) -> i128 {
+    let expected_version = client.get_settlement_version(agent, service_id);
+    client.settle(caller, agent, service_id, &expected_version)
+}
+
 /// Assert that the most recently emitted event is the expected `usage` event.
 fn assert_latest_usage_event(
     env: &Env,
@@ -544,7 +557,7 @@ fn test_credit_agent_and_settle_draws_down_balance() {
     client.credit_agent(&agent, &50i128);
 
     client.record_usage(&agent, &svc, &3u32);
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     // Capture events immediately: each later client call resets the
     // per-invocation event buffer that `events().all()` reads from.
     let events = env.events().all();
@@ -623,7 +636,7 @@ fn test_settle_partial_credit_balance_drawdown() {
     // Credit agent with less than total bill (15 stroops vs 50 stroops bill).
     client.credit_agent(&agent, &15i128);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     let events = env.events().all();
 
     assert_eq!(billed, 50i128);
@@ -638,6 +651,71 @@ fn test_settle_partial_credit_balance_drawdown() {
         .expect("settle should emit a cred_deb event for partial credit drawdown");
     let decoded: (Address, i128, i128) = data.into_val(&env);
     assert_eq!(decoded, (agent.clone(), 15i128, 0i128));
+}
+
+
+#[test]
+fn test_settlement_version_starts_zero_and_bumps_with_event() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &5u32);
+
+    assert_eq!(client.get_settlement_version(&agent, &svc), 0u64);
+    let billed = client.settle(&admin, &agent, &svc, &0u64);
+    assert_eq!(billed, 50i128);
+    assert_eq!(client.get_settlement_version(&agent, &svc), 1u64);
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("settle_v"),).into_val(&env);
+    let (_addr, _topics, data) = env
+        .events()
+        .all()
+        .iter()
+        .find(|(_a, topics, _d)| *topics == expected_topics)
+        .expect("settle should emit a settlement-version event");
+    let decoded: (Address, Symbol, u64) = data.into_val(&env);
+    assert_eq!(decoded, (agent, svc, 1u64));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #30)")]
+fn test_settle_rejects_stale_expected_version() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &1u32);
+    client.settle(&admin, &agent, &svc, &0u64);
+
+    // A second operation using the same base version is stale even if new
+    // usage arrives between calls.
+    client.record_usage(&agent, &svc, &1u32);
+    client.settle(&admin, &agent, &svc, &0u64);
+}
+
+#[test]
+fn test_settle_all_invalidates_previously_read_pair_version() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &1u32);
+    let before = client.get_settlement_version(&agent, &svc);
+
+    client.settle_all(&admin, &agent);
+
+    assert_eq!(
+        client.get_settlement_version(&agent, &svc),
+        before.saturating_add(1)
+    );
 }
 
 #[test]
@@ -812,7 +890,7 @@ fn test_settle_drains_usage_and_returns_billed() {
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &42u32);
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     assert_eq!(billed, 420i128);
     assert_eq!(client.get_usage(&agent, &svc), 0);
 }
@@ -886,7 +964,7 @@ fn test_settle_rejected_while_paused() {
     let (client, admin) = setup_initialized(&env);
     client.pause();
     let agent = Address::generate(&env);
-    client.settle(&admin, &agent, &Symbol::new(&env, "infer"));
+    settle_current(&client, &admin, &agent, &Symbol::new(&env, "infer"));
 }
 #[test]
 #[should_panic(expected = "Error(Contract, #4)")]
@@ -1039,7 +1117,7 @@ fn test_settle_returns_zero_for_unused_pair() {
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &10i128);
-    assert_eq!(client.settle(&admin, &agent, &svc), 0i128);
+    assert_eq!(settle_current(&client, &admin, &agent, &svc), 0i128);
 }
 #[test]
 fn test_compute_billing_zero_when_unpriced_or_unused() {
@@ -1309,7 +1387,7 @@ fn test_settle_drains_to_zero_and_stamps_last_settlement() {
     // No settlement has happened yet for this pair.
     assert_eq!(client.get_last_settlement(&agent, &svc), None);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
 
     assert_eq!(billed, 420i128);
     // Usage drains to exactly zero.
@@ -1330,7 +1408,7 @@ fn test_settle_billed_matches_compute_billing_for_presettle_state() {
     let expected = client.compute_billing(&agent, &svc);
     assert_eq!(expected, 91i128);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     assert_eq!(billed, expected);
     // And compute_billing now reads zero since usage drained.
     assert_eq!(client.compute_billing(&agent, &svc), 0i128);
@@ -1344,7 +1422,7 @@ fn test_settle_emits_settled_event_with_payload() {
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &42u32);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
 
     let events = env.events().all();
     assert!(!events.is_empty());
@@ -1408,7 +1486,7 @@ fn test_settle_zero_usage_returns_zero_stamps_and_emits_event() {
     client.set_service_price(&svc, &10i128);
 
     // Settle a pair that never recorded any usage.
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     assert_eq!(billed, 0i128);
 
     // Capture events immediately after `settle`: `events().all()` only
@@ -1469,7 +1547,7 @@ fn test_agent_settlement_summary_counts_outstanding_and_settled() {
     // is immediately deindexed, so it stops counting as outstanding *and*
     // stops contributing to last_settlement (see the field's doc comment).
     // `storage` remains outstanding.
-    client.settle(&admin, &agent, &inference);
+    settle_current(&client, &admin, &agent, &inference);
 
     let after = client.get_agent_settlement_summary(&agent);
     assert_eq!(
@@ -1516,18 +1594,18 @@ fn test_total_settled_counters_sum_across_settles_and_agents() {
     client.set_service_price(&storage, &7i128);
 
     client.record_usage(&agent_a, &inference, &4u32);
-    assert_eq!(client.settle(&admin, &agent_a, &inference), 40i128);
+    assert_eq!(settle_current(&client, &admin, &agent_a, &inference), 40i128);
     assert_eq!(client.get_total_settled_by_agent(&agent_a), 40i128);
     assert_eq!(client.get_total_settled_by_agent(&agent_b), 0i128);
     assert_eq!(client.get_total_settled_all_time(), 40i128);
 
     client.record_usage(&agent_a, &storage, &3u32);
-    assert_eq!(client.settle(&admin, &agent_a, &storage), 21i128);
+    assert_eq!(settle_current(&client, &admin, &agent_a, &storage), 21i128);
     assert_eq!(client.get_total_settled_by_agent(&agent_a), 61i128);
     assert_eq!(client.get_total_settled_all_time(), 61i128);
 
     client.record_usage(&agent_b, &inference, &8u32);
-    assert_eq!(client.settle(&admin, &agent_b, &inference), 80i128);
+    assert_eq!(settle_current(&client, &admin, &agent_b, &inference), 80i128);
     assert_eq!(client.get_total_settled_by_agent(&agent_a), 61i128);
     assert_eq!(client.get_total_settled_by_agent(&agent_b), 80i128);
     assert_eq!(client.get_total_settled_all_time(), 141i128);
@@ -1541,15 +1619,15 @@ fn test_total_settled_counters_ignore_zero_billed_settles() {
     let paid = Symbol::new(&env, "paid");
 
     client.record_usage(&agent, &free, &5u32);
-    assert_eq!(client.settle(&admin, &agent, &free), 0i128);
+    assert_eq!(settle_current(&client, &admin, &agent, &free), 0i128);
     assert_eq!(client.get_total_settled_by_agent(&agent), 0i128);
     assert_eq!(client.get_total_settled_all_time(), 0i128);
 
     client.set_service_price(&paid, &9i128);
     client.record_usage(&agent, &paid, &2u32);
-    assert_eq!(client.settle(&admin, &agent, &paid), 18i128);
+    assert_eq!(settle_current(&client, &admin, &agent, &paid), 18i128);
 
-    assert_eq!(client.settle(&admin, &agent, &paid), 0i128);
+    assert_eq!(settle_current(&client, &admin, &agent, &paid), 0i128);
     assert_eq!(client.get_total_settled_by_agent(&agent), 18i128);
     assert_eq!(client.get_total_settled_all_time(), 18i128);
 }
@@ -1634,13 +1712,13 @@ fn test_total_settled_counters_saturate_at_i128_max() {
 
     client.set_service_price(&svc_a, &i128::MAX);
     client.record_usage(&agent, &svc_a, &1u32);
-    assert_eq!(client.settle(&admin, &agent, &svc_a), i128::MAX);
+    assert_eq!(settle_current(&client, &admin, &agent, &svc_a), i128::MAX);
     assert_eq!(client.get_total_settled_by_agent(&agent), i128::MAX);
     assert_eq!(client.get_total_settled_all_time(), i128::MAX);
 
     client.set_service_price(&svc_b, &i128::MAX);
     client.record_usage(&agent, &svc_b, &1u32);
-    assert_eq!(client.settle(&admin, &agent, &svc_b), i128::MAX);
+    assert_eq!(settle_current(&client, &admin, &agent, &svc_b), i128::MAX);
     assert_eq!(client.get_total_settled_by_agent(&agent), i128::MAX);
     assert_eq!(client.get_total_settled_all_time(), i128::MAX);
 }
@@ -2111,7 +2189,7 @@ fn test_settle_panics_not_initialized_via_storage_helper() {
     let caller = Address::generate(&env);
     let agent = Address::generate(&env);
 
-    client.settle(&caller, &agent, &Symbol::new(&env, "infer"));
+    settle_current(&client, &caller, &agent, &Symbol::new(&env, "infer"));
 }
 
 #[test]
@@ -3031,7 +3109,7 @@ fn test_i19_lifetime_counters_survive_settle() {
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &2i128);
     client.record_usage(&agent, &svc, &9u32);
-    client.settle(&admin, &agent, &svc);
+    settle_current(&client, &admin, &agent, &svc);
     // Per-pair usage drains, lifetime analytics persist.
     assert_eq!(client.get_usage(&agent, &svc), 0);
     assert_eq!(client.get_total_usage_by_agent(&agent), 9);
@@ -3052,7 +3130,7 @@ fn test_i19_last_settlement_none_before_some_after() {
     client.record_usage(&agent, &svc, &3u32);
     // Never-settled reads as None (distinct from Some(0)).
     assert_eq!(client.get_last_settlement(&agent, &svc), None);
-    client.settle(&admin, &agent, &svc);
+    settle_current(&client, &admin, &agent, &svc);
     assert_eq!(client.get_last_settlement(&agent, &svc), Some(ts));
 }
 #[test]
@@ -3177,7 +3255,7 @@ fn test_i21_settle_returns_saturated_value_and_drains() {
     let svc = Symbol::new(&env, "infer");
     client.set_service_price(&svc, &i128::MAX);
     client.record_usage(&agent, &svc, &5u32);
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     assert_eq!(billed, i128::MAX);
     // The counter still drains to zero even when billing saturated.
     assert_eq!(client.get_usage(&agent, &svc), 0);
@@ -3751,7 +3829,7 @@ fn test_admin_can_settle_owned_service() {
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &4u32);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     assert_eq!(billed, 40i128);
     assert_eq!(client.get_usage(&agent, &svc), 0);
 }
@@ -3774,7 +3852,7 @@ fn test_owner_cannot_settle_other_service() {
     client.set_service_price(&svc_b, &10i128);
     client.record_usage(&agent, &svc_b, &3u32);
 
-    client.settle(&owner_a, &agent, &svc_b);
+    settle_current(&client, &owner_a, &agent, &svc_b);
 }
 
 /// `settle` requires service metadata when the caller is not the admin;
@@ -3790,7 +3868,7 @@ fn test_nonadmin_settle_without_metadata_rejected() {
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &2u32);
 
-    client.settle(&agent, &agent, &svc);
+    settle_current(&client, &agent, &agent, &svc);
 }
 
 /// The pause gate still applies to owner-authorized settlement.
@@ -3804,7 +3882,7 @@ fn test_owner_settle_rejected_while_paused() {
     let svc = Symbol::new(&env, "infer");
     client.set_service_metadata(&svc, &String::from_str(&env, "inference"), &owner);
     client.pause();
-    client.settle(&owner, &agent, &svc);
+    settle_current(&client, &owner, &agent, &svc);
 }
 
 /// By default the limiter is disabled (cap 0, window 0): an agent can record
@@ -4488,7 +4566,7 @@ fn test_compute_billing_agrees_with_settle() {
     let pre_settle_bill = client.compute_billing(&agent, &svc);
 
     // settle returns the billed amount and drains the counter.
-    let settled = client.settle(&admin, &agent, &svc);
+    let settled = settle_current(&client, &admin, &agent, &svc);
 
     assert_eq!(
         pre_settle_bill, settled,
@@ -4507,7 +4585,7 @@ fn test_compute_billing_zero_after_settle() {
 
     set_price(&client, &svc, 50);
     record(&client, &agent, &svc, 4);
-    client.settle(&admin, &agent, &svc);
+    settle_current(&client, &admin, &agent, &svc);
 
     // Counter is drained — billing must now be 0.
     let post_settle_bill = client.compute_billing(&agent, &svc);
@@ -5578,7 +5656,7 @@ fn test_get_billing_summary_post_settle_zeroed_usage() {
     client.record_usage(&agent, &svc, &100u32);
 
     // Settle the pair.
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     assert_eq!(billed, 1000);
 
     let summary = client.get_billing_summary(&agent, &svc);
@@ -5787,7 +5865,7 @@ fn test_settle_agrees_with_compute_billing_at_tier_boundary() {
     client.record_usage(&agent, &svc, &100u32);
 
     let expected = client.compute_billing(&agent, &svc);
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     assert_eq!(billed, expected);
     assert_eq!(billed, 1000i128);
 }
@@ -6781,7 +6859,7 @@ fn test_debit_event_payload_on_settle() {
     client.credit_agent(&agent, &credit);
     client.record_usage(&agent, &svc, &requests);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     // Capture events immediately after settle — `events().all()` only
     // surfaces events from the most recent invocation.
     let events = env.events().all();
@@ -6857,7 +6935,7 @@ fn test_debit_partial_credit_clamped_to_balance() {
     client.record_usage(&agent, &svc, &requests);
     client.credit_agent(&agent, &credit);
 
-    let billed = client.settle(&admin, &agent, &svc);
+    let billed = settle_current(&client, &admin, &agent, &svc);
     let events = env.events().all();
 
     assert_eq!(billed, 50i128);
@@ -7066,7 +7144,7 @@ fn test_debit_event_emitted_exactly_once_per_settle_with_credit() {
     client.record_usage(&agent, &svc, &5u32); // bill = 50
 
     // First settle: billed = 50 > 0 and credit > 0 → emits cred_deb.
-    client.settle(&admin, &agent, &svc);
+    settle_current(&client, &admin, &agent, &svc);
     let events_first = env.events().all();
     let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
         (symbol_short!("cred_deb"),).into_val(&env);
@@ -7080,7 +7158,7 @@ fn test_debit_event_emitted_exactly_once_per_settle_with_credit() {
     );
 
     // Second settle with no new usage: billed = 0 → no cred_deb emitted.
-    client.settle(&admin, &agent, &svc);
+    settle_current(&client, &admin, &agent, &svc);
     let events_second = env.events().all();
     let second_count = events_second
         .iter()
@@ -7621,7 +7699,7 @@ fn test_settle_unauthorized_non_owner_panics() {
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &5u32);
 
-    client.settle(&intruder, &agent, &svc);
+    settle_current(&client, &intruder, &agent, &svc);
 }
 
 /// A non-admin caller settling a service with no `ServiceMetadata` set is
@@ -7635,7 +7713,7 @@ fn test_settle_service_metadata_not_found_panics() {
     let agent = Address::generate(&env);
     let svc = Symbol::new(&env, "unregistered");
 
-    client.settle(&caller, &agent, &svc);
+    settle_current(&client, &caller, &agent, &svc);
 }
 
 /// A non-admin, non-owner caller is rejected from `settle_all` with the
