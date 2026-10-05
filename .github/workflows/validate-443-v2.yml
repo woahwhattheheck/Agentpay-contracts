@@ -42,7 +42,9 @@ jobs:
           regression = Path("contracts/escrow/src/regression_test.rs")
           text = regression.read_text()
           if not text.startswith("use super::*;"):
-              regression.write_text("use super::*;\n\n" + text)
+              text = "use super::*;\n\n" + text
+          text = text.replace("topics, &expected_topics,", "topics, expected_topics,", 1)
+          regression.write_text(text)
           PY
 
       - name: Install Rust toolchain
