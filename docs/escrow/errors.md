@@ -35,6 +35,7 @@ stable across upgrades.
 | 25 | `InvertedPriceBand` | `set_price_bounds` was called with `min_stroops > max_stroops`. | `set_price_bounds` |
 | 26 | `Unauthorized` | An entrypoint was called by an address that is neither the contract admin nor the authorised party. | `settle`, `settle_all`, `transfer_service_ownership` |
 | 27 | `InvalidOwnerTransfer` | `transfer_service_ownership` was called with a `new_owner` that matches the current owner. | `transfer_service_ownership` |
+| 30 | `VersionConflict` | `settle` received an `expected_version` that does not match `get_settlement_version(agent, service_id)`. | `settle` |
 
 ## Notes on Overloaded Codes
 
