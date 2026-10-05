@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use escrow::{Escrow, EscrowClient};
 use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
 
@@ -8,7 +6,7 @@ fn versioned_settlement_round_trip() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, Escrow);
+    let contract_id = env.register(Escrow, ());
     let client = EscrowClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let agent = Address::generate(&env);
