@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use escrow::{Escrow, EscrowClient};
 use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
 
