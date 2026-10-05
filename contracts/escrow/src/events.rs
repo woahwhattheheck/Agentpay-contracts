@@ -7,6 +7,7 @@ pub const TOPIC_USAGE_HI: Symbol = symbol_short!("usage_hi");
 pub const TOPIC_USAGE_DEC: Symbol = symbol_short!("usage_dec");
 pub const TOPIC_SETTLED: Symbol = symbol_short!("settled");
 pub const TOPIC_SETTL_ALL: Symbol = symbol_short!("settl_all");
+pub const TOPIC_SETTLE_V: Symbol = symbol_short!("settle_v");
 pub const TOPIC_PRICE_SET: Symbol = symbol_short!("price_set");
 pub const TOPIC_PRICE_RMV: Symbol = symbol_short!("price_rmv");
 pub const TOPIC_TIERS_SET: Symbol = symbol_short!("tiers_set");
