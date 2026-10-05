@@ -21,6 +21,7 @@ at build time rather than by a runtime test.
 | `tiers_set` | `service_id` | `set_price_tiers` | A volume-discount tier schedule is set for a service |
 | `tiers_rm` | `service_id` | `remove_price_tiers` | A tier schedule is removed, reverting to flat pricing |
 | `settled` | `(agent, service_id, requests, billed)` | `settle`, `settle_all` (once per service settled) | A `(agent, service_id)` pair is drained and billed |
+| `settle_v` | `(agent, service_id, new_version)` | `settle`, `settle_all` | The pair's optimistic-concurrency settlement version is bumped after a successful drain |
 | `settl_all` | `(agent, count, total_billed)` | `settle_all` | Batch summary after a full sweep — `count` includes zero-billed services |
 | `bnd_set` | `(min_stroops, max_stroops)` | `set_price_bounds` | Global min/max service price bounds are changed |
 | `cfg_set` | `(tag, value)` — see [Config tags](#config-tags) | `set_allowlist_enabled`, `set_min_requests_per_call`, `set_max_requests_per_call`, `set_max_requests_per_window`, `set_rate_window_seconds`, `set_require_service_registration` | A scalar admin config value is changed |
