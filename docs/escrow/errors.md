@@ -35,6 +35,8 @@ stable across upgrades.
 | 25 | `InvertedPriceBand` | `set_price_bounds` was called with `min_stroops > max_stroops`. | `set_price_bounds` |
 | 26 | `Unauthorized` | An entrypoint was called by an address that is neither the contract admin nor the authorised party. | `settle`, `settle_all`, `transfer_service_ownership` |
 | 27 | `InvalidOwnerTransfer` | `transfer_service_ownership` was called with a `new_owner` that matches the current owner. | `transfer_service_ownership` |
+| 28 | `InsufficientCreditBalance` | `record_usage` would make the projected bill exceed a positive prepaid credit balance. | `record_usage` |
+| 29 | `SettlementAlreadyApplied` | The current `(agent, service_id)` cycle was already claimed by a successful `settle` or `settle_all`. Positive `record_usage` is required before the pair may settle again. | `settle`, `settle_all` |
 
 ## Notes on Overloaded Codes
 

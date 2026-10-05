@@ -181,6 +181,10 @@ pub enum DataKey {
     Admin,
     /// Accumulated usage counter for a given `(agent, service_id)` pair.
     Usage(Address, Symbol),
+    /// `true` after the current `(agent, service_id)` settlement cycle has
+    /// been claimed. A successful positive `record_usage` starts a new cycle
+    /// by removing this flag. Both `settle` and `settle_all` share this key.
+    SettlementClaimed(Address, Symbol),
     /// Price per request, in stroops, for a registered service.
     ServicePrice(Symbol),
     /// `true` when the contract is paused (no state-changing entrypoints
@@ -383,6 +387,9 @@ pub enum EscrowError {
     /// insufficient to cover the bill that would be settled for the updated
     /// usage total.
     InsufficientCreditBalance = 28,
+    /// The current `(agent, service_id)` settlement cycle was already claimed
+    /// by `settle` or `settle_all`. Positive `record_usage` starts a new cycle.
+    SettlementAlreadyApplied = 29,
 }
 
 #[contracttype]
@@ -437,6 +444,21 @@ fn read_flag(env: &Env, key: &DataKey) -> bool {
 /// Write a persistent boolean flag.
 fn write_flag(env: &Env, key: &DataKey, value: bool) {
     env.storage().persistent().set(key, &value);
+}
+
+/// Atomically claim the current settlement cycle for one pair.
+///
+/// This is deliberately the first state mutation in every settlement path.
+/// Soroban transactions are atomic, so a later panic rolls the claim back;
+/// once a settlement succeeds, every duplicate entrypoint observes the same
+/// flag and rejects with a stable typed error before credit, counters, usage,
+/// timestamps, or events can be applied again.
+fn claim_settlement(env: &Env, agent: &Address, service_id: &Symbol) {
+    let key = DataKey::SettlementClaimed(agent.clone(), service_id.clone());
+    if read_flag(env, &key) {
+        panic_with_error!(env, EscrowError::SettlementAlreadyApplied);
+    }
+    write_flag(env, &key, true);
 }
 
 /// Reject a `service_id` that is not currently usable, shared by every
@@ -942,6 +964,14 @@ impl Escrow {
         check_debit_precondition(&env, &agent, &service_id, total);
         // saturate: settlement drains long before u32::MAX; never panic the hot path.
         env.storage().persistent().set(&key, &total);
+
+        // Every successful positive usage write starts a fresh settlement
+        // cycle. Removing the claim (rather than storing `false`) avoids a
+        // permanent zero-value slot and makes the re-arm explicit.
+        env.storage().persistent().remove(&DataKey::SettlementClaimed(
+            agent.clone(),
+            service_id.clone(),
+        ));
 
         // Maintain per-agent service index. index_agent_service is idempotent
         // (no-op when the service is already indexed), so it is safe to call on
@@ -1587,9 +1617,15 @@ impl Escrow {
 
     /// Settle the accumulated usage for an `(agent, service_id)` pair.
     ///
-    /// Admin-gated. Computes the outstanding bill (same math as
-    /// `compute_billing`), resets the usage counter to zero, and returns
-    /// the billed amount in stroops. The settlement loop is expected to
+    /// Owner-or-admin gated. Atomically claims the current settlement
+    /// cycle before any credit, counter, usage, timestamp, index, or event
+    /// effect. A duplicate call for the same cycle panics with
+    /// [`EscrowError::SettlementAlreadyApplied`]. A successful positive
+    /// `record_usage` call is the only operation that re-arms the pair.
+    ///
+    /// Computes the outstanding bill (same math as `compute_billing`),
+    /// resets the usage counter to zero, and returns the billed amount in
+    /// stroops. The settlement loop is expected to
     /// transfer the returned amount off-chain or via a paired token
     /// contract call; this contract intentionally holds no balance.
     pub fn settle(env: Env, caller: Address, agent: Address, service_id: Symbol) -> i128 {
@@ -1603,6 +1639,12 @@ impl Escrow {
             &service_id,
             EscrowError::NotPendingAdmin,
         );
+
+        // Claim before any value/accounting effect. A duplicate call fails
+        // here, before credit debit, lifetime counters, usage drain, stamp,
+        // deindexing, or event publication.
+        claim_settlement(&env, &agent, &service_id);
+
         let usage_key = DataKey::Usage(agent.clone(), service_id.clone());
         let requests: u32 = env.storage().persistent().get(&usage_key).unwrap_or(0);
         // Use tier schedule when present; fall back to flat price.
@@ -1644,11 +1686,19 @@ impl Escrow {
     /// constant, but the guard protects against a future migration that
     /// could write a larger index.
     ///
+    /// Authorization is preflighted for the complete index, then every
+    /// service cycle is claimed before the first settlement effect is applied.
+    /// A previously claimed service rejects the entire batch with
+    /// [`EscrowError::SettlementAlreadyApplied`]; transaction rollback leaves
+    /// every other service untouched. This makes the guard total across
+    /// `settle` and `settle_all` and closes mixed-entrypoint duplicates.
+    ///
     /// Each service that has a non-zero usage counter is settled (usage
     /// zeroed, `LastSettlement` stamped, `settled` event emitted) matching
-    /// the semantics of a direct `settle` call. Services with zero usage
-    /// are still included in the return value (with a billed amount of 0)
-    /// so callers can confirm the full sweep. After the sweep, emits one
+    /// the semantics of a direct `settle` call. A zero-usage service may be
+    /// settled once for its current cycle and is included with billed amount
+    /// 0, but cannot be swept repeatedly without new positive usage. After
+    /// the sweep, emits one
     /// `settl_all(agent, count, total_billed)` batch-summary event so
     /// indexers can track a full drain without summing the per-service
     /// `settled` events themselves. `count` is the number of services in
@@ -1674,12 +1724,9 @@ impl Escrow {
             panic_with_error!(&env, EscrowError::SettleAllTooLarge);
         }
 
-        let now = env.ledger().timestamp();
-        let mut results: Vec<(Symbol, i128)> = Vec::new(&env);
-        let mut total_billed: i128 = 0;
-
+        // Phase 1: validate every service before mutating any claim. This
+        // preserves one all-or-nothing authorization decision for the batch.
         for service_id in svc_list.iter() {
-            // Non-admin callers must own this specific service.
             require_settlement_authorized(
                 &env,
                 &admin,
@@ -1687,7 +1734,21 @@ impl Escrow {
                 &service_id,
                 EscrowError::Unauthorized,
             );
+        }
 
+        // Phase 2: claim every cycle before applying the first outward/value
+        // effect. If any service was already claimed, the panic rolls back all
+        // earlier claims in this transaction and no service is drained.
+        for service_id in svc_list.iter() {
+            claim_settlement(&env, &agent, &service_id);
+        }
+
+        // Phase 3: with the whole batch secured, apply settlement effects.
+        let now = env.ledger().timestamp();
+        let mut results: Vec<(Symbol, i128)> = Vec::new(&env);
+        let mut total_billed: i128 = 0;
+
+        for service_id in svc_list.iter() {
             let usage_key = DataKey::Usage(agent.clone(), service_id.clone());
             let requests: u32 = env.storage().persistent().get(&usage_key).unwrap_or(0);
             let price: i128 = env

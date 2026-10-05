@@ -1549,7 +1549,7 @@ fn test_total_settled_counters_ignore_zero_billed_settles() {
     client.record_usage(&agent, &paid, &2u32);
     assert_eq!(client.settle(&admin, &agent, &paid), 18i128);
 
-    assert_eq!(client.settle(&admin, &agent, &paid), 0i128);
+    assert!(client.try_settle(&admin, &agent, &paid).is_err());
     assert_eq!(client.get_total_settled_by_agent(&agent), 18i128);
     assert_eq!(client.get_total_settled_all_time(), 18i128);
 }
@@ -1601,11 +1601,8 @@ fn test_settle_all_emits_settl_all_batch_summary_event() {
     assert_eq!(decoded, (agent, 2u32, 95i128));
 }
 #[test]
-fn test_settle_all_batch_summary_reflects_zero_usage_services() {
-    // settle_all does not deindex (unlike settle()), so a service it just
-    // drained stays in the index. A second settle_all sweep therefore
-    // covers the same service with zero usage — the batch event must
-    // still fire, with total_billed = 0.
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_settle_all_duplicate_batch_is_rejected() {
     let env = Env::default();
     let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
@@ -1614,15 +1611,9 @@ fn test_settle_all_batch_summary_reflects_zero_usage_services() {
     client.record_usage(&agent, &svc, &1u32);
     client.settle_all(&admin, &agent);
 
+    // settle_all leaves the service indexed, so this reaches the shared
+    // cycle claim and must reject instead of restamping or re-emitting.
     client.settle_all(&admin, &agent);
-    let events_after = env.events().all();
-    assert!(!events_after.is_empty());
-    let (_addr, topics, data) = events_after.last().unwrap();
-    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
-        (symbol_short!("settl_all"),).into_val(&env);
-    assert_eq!(topics, expected_topics);
-    let decoded: (Address, u32, i128) = data.into_val(&env);
-    assert_eq!(decoded, (agent, 1u32, 0i128));
 }
 #[test]
 fn test_total_settled_counters_saturate_at_i128_max() {
@@ -7048,14 +7039,9 @@ fn test_debit_boundary_free_service_no_check() {
     );
 }
 
-/// settle emits `cred_deb` exactly once even when called twice.
-///
-/// Verifies that two sequential settle calls each emit at most one
-/// `cred_deb` event, and that the second call (with zero usage) does
-/// not emit a debit event (since `billed == 0` and `debit_agent_credit`
-/// short-circuits on zero billed amounts).
+/// A duplicate settle is rejected before a second credit/accounting effect.
 #[test]
-fn test_debit_event_emitted_exactly_once_per_settle_with_credit() {
+fn test_duplicate_settle_rejected_before_second_credit_effect() {
     let env = Env::default();
     let (client, admin) = setup_initialized(&env);
 
@@ -7065,30 +7051,15 @@ fn test_debit_event_emitted_exactly_once_per_settle_with_credit() {
     client.credit_agent(&agent, &200i128);
     client.record_usage(&agent, &svc, &5u32); // bill = 50
 
-    // First settle: billed = 50 > 0 and credit > 0 → emits cred_deb.
     client.settle(&admin, &agent, &svc);
-    let events_first = env.events().all();
-    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
-        (symbol_short!("cred_deb"),).into_val(&env);
-    let first_count = events_first
-        .iter()
-        .filter(|(_, t, _)| *t == expected_topics)
-        .count();
-    assert_eq!(
-        first_count, 1,
-        "first settle (non-zero bill) must emit one cred_deb"
-    );
+    let credit_after_first = client.get_agent_credit(&agent);
+    let settled_after_first = client.get_total_settled_by_agent(&agent);
 
-    // Second settle with no new usage: billed = 0 → no cred_deb emitted.
-    client.settle(&admin, &agent, &svc);
-    let events_second = env.events().all();
-    let second_count = events_second
-        .iter()
-        .filter(|(_, t, _)| *t == expected_topics)
-        .count();
+    assert!(client.try_settle(&admin, &agent, &svc).is_err());
+    assert_eq!(client.get_agent_credit(&agent), credit_after_first);
     assert_eq!(
-        second_count, 0,
-        "second settle (zero bill) must not emit cred_deb"
+        client.get_total_settled_by_agent(&agent),
+        settled_after_first
     );
 }
 
@@ -7782,4 +7753,117 @@ fn test_cfg_set_payload_tags_are_mutually_distinct() {
             );
         }
     }
+}
+
+
+// ── Settlement cycle once-only guard (#447) ────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_settlement_guard_first_succeeds_second_is_typed_error() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = make_agent(&env);
+    let svc = make_service(&env, "once");
+    client.set_service_price(&svc, &7i128);
+    client.record_usage(&agent, &svc, &3u32);
+
+    assert_eq!(client.settle(&admin, &agent, &svc), 21i128);
+    client.settle(&admin, &agent, &svc);
+}
+
+#[test]
+fn test_settlement_guard_positive_usage_rearms_the_pair() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = make_agent(&env);
+    let svc = make_service(&env, "rearm");
+    client.set_service_price(&svc, &5i128);
+
+    client.record_usage(&agent, &svc, &2u32);
+    assert_eq!(client.settle(&admin, &agent, &svc), 10i128);
+
+    client.record_usage(&agent, &svc, &4u32);
+    assert_eq!(client.settle(&admin, &agent, &svc), 20i128);
+    assert_eq!(client.get_total_settled_by_agent(&agent), 30i128);
+}
+
+#[test]
+fn test_settlement_guard_unrelated_pairs_are_independent() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = make_agent(&env);
+    let first = make_service(&env, "first");
+    let second = make_service(&env, "second");
+    client.set_service_price(&first, &2i128);
+    client.set_service_price(&second, &3i128);
+    client.record_usage(&agent, &first, &5u32);
+    client.record_usage(&agent, &second, &7u32);
+
+    assert_eq!(client.settle(&admin, &agent, &first), 10i128);
+    assert_eq!(client.settle(&admin, &agent, &second), 21i128);
+}
+
+#[test]
+fn test_settlement_guard_concurrent_double_call_applies_once() {
+    // Soroban transactions serialize competing submissions. Two calls made
+    // against the same cycle model that race: the first commits the claim;
+    // the next observes it and cannot repeat value/accounting effects.
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = make_agent(&env);
+    let svc = make_service(&env, "race");
+    client.set_service_price(&svc, &10i128);
+    client.credit_agent(&agent, &100i128);
+    client.record_usage(&agent, &svc, &4u32);
+
+    assert_eq!(client.settle(&admin, &agent, &svc), 40i128);
+    let credit_after_first = client.get_agent_credit(&agent);
+    let total_after_first = client.get_total_settled_by_agent(&agent);
+    let stamp_after_first = client.get_last_settlement(&agent, &svc);
+
+    assert!(client.try_settle(&admin, &agent, &svc).is_err());
+    assert_eq!(client.get_agent_credit(&agent), credit_after_first);
+    assert_eq!(client.get_total_settled_by_agent(&agent), total_after_first);
+    assert_eq!(client.get_last_settlement(&agent, &svc), stamp_after_first);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_settlement_guard_is_total_across_settle_all_then_settle() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = make_agent(&env);
+    let svc = make_service(&env, "mixed");
+    client.set_service_price(&svc, &11i128);
+    client.record_usage(&agent, &svc, &2u32);
+
+    let result = client.settle_all(&admin, &agent);
+    assert_eq!(result.get(0), Some((svc.clone(), 22i128)));
+    client.settle(&admin, &agent, &svc);
+}
+
+#[test]
+fn test_settlement_guard_batch_preclaim_rolls_back_before_effects() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = make_agent(&env);
+    let first = make_service(&env, "batch_a");
+    let second = make_service(&env, "batch_b");
+    client.set_service_price(&first, &2i128);
+    client.set_service_price(&second, &3i128);
+    client.record_usage(&agent, &first, &1u32);
+    client.record_usage(&agent, &second, &1u32);
+
+    // Claims both cycles while leaving both services indexed.
+    client.settle_all(&admin, &agent);
+    // Re-arm only the first. The second remains claimed, so the next batch
+    // must fail during the claim phase before draining first's new usage.
+    client.record_usage(&agent, &first, &5u32);
+    assert!(client.try_settle_all(&admin, &agent).is_err());
+    assert_eq!(client.get_usage(&agent, &first), 5u32);
+
+    // The failed batch rolled back first's tentative claim, so a direct
+    // settlement of that fresh cycle still succeeds.
+    assert_eq!(client.settle(&admin, &agent, &first), 10i128);
 }
