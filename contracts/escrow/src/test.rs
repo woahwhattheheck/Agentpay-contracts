@@ -653,7 +653,6 @@ fn test_settle_partial_credit_balance_drawdown() {
     assert_eq!(decoded, (agent.clone(), 15i128, 0i128));
 }
 
-
 #[test]
 fn test_settlement_version_starts_zero_and_bumps_with_event() {
     let env = Env::default();
@@ -1594,7 +1593,10 @@ fn test_total_settled_counters_sum_across_settles_and_agents() {
     client.set_service_price(&storage, &7i128);
 
     client.record_usage(&agent_a, &inference, &4u32);
-    assert_eq!(settle_current(&client, &admin, &agent_a, &inference), 40i128);
+    assert_eq!(
+        settle_current(&client, &admin, &agent_a, &inference),
+        40i128
+    );
     assert_eq!(client.get_total_settled_by_agent(&agent_a), 40i128);
     assert_eq!(client.get_total_settled_by_agent(&agent_b), 0i128);
     assert_eq!(client.get_total_settled_all_time(), 40i128);
@@ -1605,7 +1607,10 @@ fn test_total_settled_counters_sum_across_settles_and_agents() {
     assert_eq!(client.get_total_settled_all_time(), 61i128);
 
     client.record_usage(&agent_b, &inference, &8u32);
-    assert_eq!(settle_current(&client, &admin, &agent_b, &inference), 80i128);
+    assert_eq!(
+        settle_current(&client, &admin, &agent_b, &inference),
+        80i128
+    );
     assert_eq!(client.get_total_settled_by_agent(&agent_a), 61i128);
     assert_eq!(client.get_total_settled_by_agent(&agent_b), 80i128);
     assert_eq!(client.get_total_settled_all_time(), 141i128);
