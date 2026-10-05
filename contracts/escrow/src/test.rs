@@ -654,7 +654,7 @@ fn test_settle_partial_credit_balance_drawdown() {
 }
 
 #[test]
-fn test_settlement_version_starts_zero_and_bumps_with_event() {
+fn test_settle_matching_version_succeeds_and_bumps() {
     let env = Env::default();
     let (client, admin) = setup_initialized(&env);
     let agent = Address::generate(&env);
@@ -663,10 +663,85 @@ fn test_settlement_version_starts_zero_and_bumps_with_event() {
     client.set_service_price(&svc, &10i128);
     client.record_usage(&agent, &svc, &5u32);
 
-    assert_eq!(client.get_settlement_version(&agent, &svc), 0u64);
-    let billed = client.settle(&admin, &agent, &svc, &0u64);
-    assert_eq!(billed, 50i128);
+    let expected_version = client.get_settlement_version(&agent, &svc);
+    assert_eq!(expected_version, 0u64);
+    assert_eq!(
+        client.settle(&admin, &agent, &svc, &expected_version),
+        50i128
+    );
     assert_eq!(client.get_settlement_version(&agent, &svc), 1u64);
+}
+
+#[test]
+fn test_settle_stale_version_returns_typed_conflict() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &1u32);
+
+    assert!(client
+        .try_settle(&admin, &agent, &svc, &9u64)
+        .is_err());
+    assert_eq!(client.get_settlement_version(&agent, &svc), 0u64);
+    assert_eq!(client.get_usage(&agent, &svc), 1u32);
+}
+
+#[test]
+fn test_two_settles_from_same_base_second_conflicts() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &1u32);
+
+    let shared_base = client.get_settlement_version(&agent, &svc);
+    assert_eq!(
+        client.settle(&admin, &agent, &svc, &shared_base),
+        10i128
+    );
+
+    client.record_usage(&agent, &svc, &1u32);
+    assert!(client
+        .try_settle(&admin, &agent, &svc, &shared_base)
+        .is_err());
+    assert_eq!(
+        client.get_settlement_version(&agent, &svc),
+        shared_base + 1
+    );
+    assert_eq!(client.get_usage(&agent, &svc), 1u32);
+}
+
+#[test]
+fn test_get_settlement_version_exposes_current_version() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    assert_eq!(client.get_settlement_version(&agent, &svc), 0u64);
+
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &1u32);
+    client.settle(&admin, &agent, &svc, &0u64);
+
+    assert_eq!(client.get_settlement_version(&agent, &svc), 1u64);
+}
+
+#[test]
+fn test_settle_emits_version_bump_event() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized(&env);
+    let agent = Address::generate(&env);
+    let svc = Symbol::new(&env, "infer");
+
+    client.set_service_price(&svc, &10i128);
+    client.record_usage(&agent, &svc, &5u32);
+    client.settle(&admin, &agent, &svc, &0u64);
 
     let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
         (symbol_short!("settle_v"),).into_val(&env);
@@ -678,24 +753,6 @@ fn test_settlement_version_starts_zero_and_bumps_with_event() {
         .expect("settle should emit a settlement-version event");
     let decoded: (Address, Symbol, u64) = data.into_val(&env);
     assert_eq!(decoded, (agent, svc, 1u64));
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #30)")]
-fn test_settle_rejects_stale_expected_version() {
-    let env = Env::default();
-    let (client, admin) = setup_initialized(&env);
-    let agent = Address::generate(&env);
-    let svc = Symbol::new(&env, "infer");
-
-    client.set_service_price(&svc, &10i128);
-    client.record_usage(&agent, &svc, &1u32);
-    client.settle(&admin, &agent, &svc, &0u64);
-
-    // A second operation using the same base version is stale even if new
-    // usage arrives between calls.
-    client.record_usage(&agent, &svc, &1u32);
-    client.settle(&admin, &agent, &svc, &0u64);
 }
 
 #[test]
