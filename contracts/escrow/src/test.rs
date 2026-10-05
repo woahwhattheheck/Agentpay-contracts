@@ -55,6 +55,7 @@
 //! verify that auth *is* enforced, use `setup_scoped_auth` or call
 //! `env.set_auths(&[])` to drop mock authorisations before the call under
 //! test.
+#[path = "regression_test.rs"]
 mod regression_test;
 extern crate alloc;
 extern crate std;
@@ -3756,10 +3757,9 @@ fn test_admin_can_settle_owned_service() {
     assert_eq!(client.get_usage(&agent, &svc), 0);
 }
 
-/// `settle` is admin-gated, so a caller with the admin key can settle any
-/// service regardless of ownership metadata.
+/// Owning one service does not authorize settling a different owner's service.
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")]
+#[should_panic(expected = "Error(Contract, #26)")]
 fn test_owner_cannot_settle_other_service() {
     let env = Env::default();
     let (client, admin) = setup_initialized(&env);
@@ -7604,11 +7604,10 @@ fn test_svc_catalog_all_new_topics_distinct_from_existing() {
 // require_settlement_authorized (shared settle/settle_all check) — issue #300
 // ---------------------------------------------------------------------------
 
-/// A non-admin, non-owner caller is rejected from `settle` with the same
-/// `NotPendingAdmin` code the inline check used before it was extracted
-/// into `require_settlement_authorized`.
+/// A non-admin, non-owner caller receives the same Unauthorized code from
+/// `settle` and `settle_all`; #6 is reserved for admin handover.
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")]
+#[should_panic(expected = "Error(Contract, #26)")]
 fn test_settle_unauthorized_non_owner_panics() {
     let env = Env::default();
     let (client, _admin) = setup_initialized(&env);
@@ -7686,6 +7685,16 @@ fn test_settle_all_service_metadata_not_found_panics() {
     let _ = admin;
     let _ = owner;
     client.settle_all(&intruder, &agent);
+}
+
+#[test]
+fn test_settlement_error_codes_are_stable() {
+    assert_eq!(EscrowError::NotInitialized as u32, 3);
+    assert_eq!(EscrowError::ContractPaused as u32, 4);
+    assert_eq!(EscrowError::NotPendingAdmin as u32, 6);
+    assert_eq!(EscrowError::ServiceMetadataNotFound as u32, 13);
+    assert_eq!(EscrowError::SettleAllTooLarge as u32, 19);
+    assert_eq!(EscrowError::Unauthorized as u32, 26);
 }
 
 // ── Shared cfg_set event payload (publish_cfg_event helper) ─────────────────
