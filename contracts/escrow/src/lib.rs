@@ -1635,11 +1635,7 @@ impl Escrow {
         );
 
         let version_key = DataKey::SettlementVersion(agent.clone(), service_id.clone());
-        let current_version: u64 = env
-            .storage()
-            .persistent()
-            .get(&version_key)
-            .unwrap_or(0);
+        let current_version: u64 = env.storage().persistent().get(&version_key).unwrap_or(0);
         if expected_version != current_version {
             panic_with_error!(&env, EscrowError::VersionConflict);
         }
@@ -1662,9 +1658,7 @@ impl Escrow {
         );
 
         let new_version = current_version.saturating_add(1);
-        env.storage()
-            .persistent()
-            .set(&version_key, &new_version);
+        env.storage().persistent().set(&version_key, &new_version);
         env.events().publish(
             (events::TOPIC_SETTLE_V,),
             (agent.clone(), service_id.clone(), new_version),
@@ -1763,15 +1757,9 @@ impl Escrow {
             // `settle`, so it must also invalidate any version read before
             // this sweep.
             let version_key = DataKey::SettlementVersion(agent.clone(), service_id.clone());
-            let current_version: u64 = env
-                .storage()
-                .persistent()
-                .get(&version_key)
-                .unwrap_or(0);
+            let current_version: u64 = env.storage().persistent().get(&version_key).unwrap_or(0);
             let new_version = current_version.saturating_add(1);
-            env.storage()
-                .persistent()
-                .set(&version_key, &new_version);
+            env.storage().persistent().set(&version_key, &new_version);
             env.events().publish(
                 (events::TOPIC_SETTLE_V,),
                 (agent.clone(), service_id.clone(), new_version),
