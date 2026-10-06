@@ -968,10 +968,12 @@ impl Escrow {
         // Every successful positive usage write starts a fresh settlement
         // cycle. Removing the claim (rather than storing `false`) avoids a
         // permanent zero-value slot and makes the re-arm explicit.
-        env.storage().persistent().remove(&DataKey::SettlementClaimed(
-            agent.clone(),
-            service_id.clone(),
-        ));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::SettlementClaimed(
+                agent.clone(),
+                service_id.clone(),
+            ));
 
         // Maintain per-agent service index. index_agent_service is idempotent
         // (no-op when the service is already indexed), so it is safe to call on
@@ -1029,7 +1031,6 @@ impl Escrow {
                 (events::TOPIC_USAGE_HI,),
                 (agent.clone(), service_id.clone(), total),
             );
-
         }
 
         UsageRecord {
@@ -1418,8 +1419,7 @@ impl Escrow {
         env.storage()
             .persistent()
             .remove(&DataKey::ServicePrice(service_id.clone()));
-        env.events()
-            .publish((events::TOPIC_PRICE_RMV,), service_id);
+        env.events().publish((events::TOPIC_PRICE_RMV,), service_id);
     }
 
     /// Admin sets a volume-discount tier schedule for a service.
@@ -2619,7 +2619,12 @@ impl Escrow {
             write_flag(&env, &dispute_key, false);
             env.events().publish(
                 (events::TOPIC_DISPUTE,),
-                (events::TOPIC_RESOLVE, agent.clone(), service_id.clone(), current),
+                (
+                    events::TOPIC_RESOLVE,
+                    agent.clone(),
+                    service_id.clone(),
+                    current,
+                ),
             );
         }
     }

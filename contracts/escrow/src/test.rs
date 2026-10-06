@@ -7755,7 +7755,6 @@ fn test_cfg_set_payload_tags_are_mutually_distinct() {
     }
 }
 
-
 // ── Settlement cycle once-only guard (#447) ────────────────────────────────
 
 #[test]
